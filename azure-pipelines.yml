@@ -1,0 +1,176 @@
+
+trigger:
+- main
+
+pool:
+  name: DevSecOps
+
+variables:
+  serviceConnection: 'DevSecOPs'
+  backendStorage: 'devsecopsstrg'
+  backendContainer: 'devsecopcont'
+  backendKey: 'backup.tfstate'
+
+###################################################
+# DEV
+###################################################
+
+stages:
+
+- stage: DEV
+  displayName: "Development"
+
+  jobs:
+  - job: Terraform_DEV
+    displayName: "Terraform Dev"
+
+    steps:
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+        backendServiceArm: $(serviceConnection)
+        backendAzureRmStorageAccountName: $(backendStorage)
+        backendAzureRmContainerName: $(backendContainer)
+        backendAzureRmKey: $(backendKey)
+
+    - script: terraform validate
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      displayName: Terraform Validate
+
+    - script: terraform fmt -recursive -check
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      displayName: Terraform Format Check
+
+    - script: tflint
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      displayName: TFLint Scan
+
+    - script: tfsec .
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      displayName: TFSec Scan
+
+    - script: checkov -d .
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      displayName: Checkov Scan
+
+    - task: TerraformTask@5
+      displayName: Terraform Plan
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+        environmentServiceNameAzureRM: $(serviceConnection)
+
+###################################################
+# QA
+###################################################
+
+- stage: QA
+  displayName: "QA"
+  dependsOn: DEV
+  condition: succeeded()
+
+  jobs:
+  - job: Terraform_QA
+
+    steps:
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+        backendServiceArm: $(serviceConnection)
+        backendAzureRmStorageAccountName: $(backendStorage)
+        backendAzureRmContainerName: $(backendContainer)
+        backendAzureRmKey: qa.tfstate
+
+    - script: terraform validate
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+
+    - script: terraform fmt -recursive -check
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+
+    - script: tflint
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+
+    - script: tfsec .
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+
+    - script: checkov -d .
+      workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+
+    - task: TerraformTask@5
+      displayName: Terraform Plan
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: $(System.DefaultWorkingDirectory)/Root/QA
+        environmentServiceNameAzureRM: $(serviceConnection)
+
+###################################################
+# PROD
+###################################################
+
+- stage: PROD
+  displayName: "Production"
+  dependsOn: QA
+  condition: succeeded()
+
+  jobs:
+  - deployment: Terraform_PROD
+
+    environment: Production
+
+    strategy:
+      runOnce:
+        deploy:
+
+          steps:
+
+          - task: TerraformTask@5
+            displayName: Terraform Init
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+              backendServiceArm: $(serviceConnection)
+              backendAzureRmStorageAccountName: $(backendStorage)
+              backendAzureRmContainerName: $(backendContainer)
+              backendAzureRmKey: prod.tfstate
+
+          - script: terraform validate
+            workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+
+          - script: terraform fmt -recursive -check
+            workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+
+          - script: tflint
+            workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+
+          - script: tfsec .
+            workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+
+          - script: checkov -d .
+            workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+
+          - task: TerraformTask@5
+            displayName: Terraform Plan
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+              environmentServiceNameAzureRM: $(serviceConnection)
+
+          - task: TerraformTask@5
+            displayName: Terraform Apply
+            inputs:
+              provider: azurerm
+              command: apply
+              workingDirectory: $(System.DefaultWorkingDirectory)/Root/Prod
+              environmentServiceNameAzureRM: $(serviceConnection)
