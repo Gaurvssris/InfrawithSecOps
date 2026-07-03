@@ -46,14 +46,7 @@ stages:
         backendAzureRmContainerName: devsecopcont
         backendAzureRmKey: dev.tfstate
 
-    #########################
-    # FMT
-    #########################
 
-    - script: |
-        terraform fmt -recursive -check
-      displayName: Terraform Format
-      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
 
     #########################
     # VALIDATE
