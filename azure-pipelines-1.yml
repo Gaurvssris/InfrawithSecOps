@@ -7,6 +7,8 @@ pool:
 variables:
   workingDir: '$(System.DefaultWorkingDirectory)/Root/Dev'
   terraformVersion: '1.9.8'
+  tflintVersion: '0.53.0'
+  tfsecVersion: '1.28.10'
 
 stages:
 
@@ -68,20 +70,25 @@ stages:
         workingDirectory: $(workingDir)
 
     ###########################################################
-    # Install TFLint
+    # Install TFLint (direct binary download, no choco needed)
     ###########################################################
 
     - powershell: |
-        if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
-            Write-Host "Chocolatey is not installed."
-            exit 1
-        }
+        $ErrorActionPreference = "Stop"
 
-        choco install tflint -y
+        $installDir = "$(Agent.ToolsDirectory)\tflint"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-        $env:Path += ";C:\ProgramData\chocolatey\bin"
+        $zipUrl = "https://github.com/terraform-linters/tflint/releases/download/v$(tflintVersion)/tflint_windows_amd64.zip"
+        $zipPath = "$installDir\tflint.zip"
 
-        tflint --version
+        Write-Host "Downloading TFLint from $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+
+        Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFLint installed at $installDir"
       displayName: Install TFLint
 
     ###########################################################
@@ -89,18 +96,30 @@ stages:
     ###########################################################
 
     - powershell: |
+        tflint --version
         tflint --init
         tflint
       workingDirectory: $(workingDir)
       displayName: Run TFLint
 
     ###########################################################
-    # Install TFSEC
+    # Install TFSEC (direct binary download, no choco needed)
     ###########################################################
 
     - powershell: |
-        choco install tfsec -y
-        tfsec --version
+        $ErrorActionPreference = "Stop"
+
+        $installDir = "$(Agent.ToolsDirectory)\tfsec"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+        $exeUrl = "https://github.com/aquasecurity/tfsec/releases/download/v$(tfsecVersion)/tfsec-windows-amd64.exe"
+        $exePath = "$installDir\tfsec.exe"
+
+        Write-Host "Downloading TFSEC from $exeUrl"
+        Invoke-WebRequest -Uri $exeUrl -OutFile $exePath
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFSEC installed at $installDir"
       displayName: Install TFSEC
 
     ###########################################################
@@ -108,6 +127,7 @@ stages:
     ###########################################################
 
     - powershell: |
+        tfsec --version
         tfsec .
       workingDirectory: $(workingDir)
       displayName: Run TFSEC
