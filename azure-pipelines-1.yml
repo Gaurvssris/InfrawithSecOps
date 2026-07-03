@@ -5,12 +5,15 @@ pool:
   name: DevOps
 
 variables:
-  workingDir: '$(System.DefaultWorkingDirectory)/Root/Dev'
   terraformVersion: '1.9.8'
   tflintVersion: '0.53.0'
   tfsecVersion: '1.28.10'
 
 stages:
+
+###############################################################
+# DEV STAGE
+###############################################################
 
 - stage: DEV
   displayName: "Terraform DEV"
@@ -18,6 +21,9 @@ stages:
   jobs:
   - job: Terraform_DEV
     displayName: "Terraform DEV Validation"
+
+    variables:
+      workingDir: '$(System.DefaultWorkingDirectory)/Root/Dev'
 
     steps:
 
@@ -96,8 +102,194 @@ stages:
     # NOTE: tflint exits with a non-zero code whenever it finds
     # ANY issue, even just warnings (like missing variable types).
     # ignoreLASTEXITCODE keeps this from failing the whole pipeline.
-    # Fix the warnings in variable.tf when you get a chance, then
-    # you can remove ignoreLASTEXITCODE to enforce clean lint runs.
+    ###########################################################
+
+    - powershell: |
+        tflint --version
+        tflint --init
+        tflint
+      workingDirectory: $(workingDir)
+      displayName: Run TFLint
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Install TFSEC (direct binary download, no choco needed)
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $installDir = "$(Agent.ToolsDirectory)\tfsec"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+        $exeUrl = "https://github.com/aquasecurity/tfsec/releases/download/v$(tfsecVersion)/tfsec-windows-amd64.exe"
+        $exePath = "$installDir\tfsec.exe"
+
+        Write-Host "Downloading TFSEC from $exeUrl"
+        Invoke-WebRequest -Uri $exeUrl -OutFile $exePath
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFSEC installed at $installDir"
+      displayName: Install TFSEC
+
+    ###########################################################
+    # Run TFSEC
+    # NOTE: tfsec also exits non-zero if it finds any security
+    # findings. ignoreLASTEXITCODE keeps this from blocking the
+    # pipeline. Review the findings in the log and fix real issues.
+    ###########################################################
+
+    - powershell: |
+        tfsec --version
+        tfsec .
+      workingDirectory: $(workingDir)
+      displayName: Run TFSEC
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Verify Python (use the system-installed Python already on
+    # this self-hosted agent instead of downloading one from
+    # GitHub)
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pythonCmd) {
+          Write-Host "##[error]Python was not found on PATH for this agent."
+          Write-Host "##[error]Please install Python 3.x once manually on this agent machine (e.g. from https://www.python.org/downloads/windows/) and ensure it is added to PATH, then re-run the pipeline."
+          exit 1
+        }
+
+        python --version
+      displayName: Verify Python
+
+    ###########################################################
+    # Install Checkov
+    ###########################################################
+
+    - powershell: |
+        python -m pip install --upgrade pip
+        pip install checkov
+        checkov --version
+      displayName: Install Checkov
+
+    ###########################################################
+    # Run Checkov
+    # NOTE: checkov also exits non-zero when it finds failed checks.
+    # ignoreLASTEXITCODE keeps this from blocking the pipeline.
+    ###########################################################
+
+    - powershell: |
+        checkov -d .
+      workingDirectory: $(workingDir)
+      displayName: Run Checkov
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Terraform Plan
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Plan
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: $(workingDir)
+        environmentServiceNameAzureRM: DevSecOPs
+
+
+###############################################################
+# QA STAGE (runs only after DEV succeeds)
+###############################################################
+
+- stage: QA
+  displayName: "Terraform QA"
+  dependsOn: DEV
+  condition: succeeded()
+
+  jobs:
+  - job: Terraform_QA
+    displayName: "Terraform QA Validation"
+
+    variables:
+      workingDir: '$(System.DefaultWorkingDirectory)/Root/QA'
+
+    steps:
+
+    - checkout: self
+
+    ###########################################################
+    # Install Terraform
+    ###########################################################
+
+    - task: TerraformInstaller@1
+      displayName: Install Terraform
+      inputs:
+        terraformVersion: $(terraformVersion)
+
+    ###########################################################
+    # Terraform Init
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: $(workingDir)
+
+        backendServiceArm: DevSecOPs
+        backendAzureRmResourceGroupName: devsecops-rg
+        backendAzureRmStorageAccountName: devsecopsstrg
+        backendAzureRmContainerName: devsecopcont
+        backendAzureRmKey: qa.tfstate
+
+    ###########################################################
+    # Terraform Format
+    ###########################################################
+
+    - script: |
+        terraform fmt -recursive
+      workingDirectory: $(workingDir)
+      displayName: Terraform Format
+
+    ###########################################################
+    # Terraform Validate
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Validate
+      inputs:
+        provider: azurerm
+        command: validate
+        workingDirectory: $(workingDir)
+
+    ###########################################################
+    # Install TFLint (direct binary download, no choco needed)
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $installDir = "$(Agent.ToolsDirectory)\tflint"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+        $zipUrl = "https://github.com/terraform-linters/tflint/releases/download/v$(tflintVersion)/tflint_windows_amd64.zip"
+        $zipPath = "$installDir\tflint.zip"
+
+        Write-Host "Downloading TFLint from $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+
+        Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFLint installed at $installDir"
+      displayName: Install TFLint
+
+    ###########################################################
+    # Run TFLint
     ###########################################################
 
     - powershell: |
@@ -132,12 +324,6 @@ stages:
     # Run TFSEC
     ###########################################################
 
-    ###########################################################
-    # NOTE: tfsec also exits non-zero if it finds any security
-    # findings. ignoreLASTEXITCODE keeps this from blocking the
-    # pipeline. Review the findings in the log and fix real issues.
-    ###########################################################
-
     - powershell: |
         tfsec --version
         tfsec .
@@ -146,11 +332,7 @@ stages:
       ignoreLASTEXITCODE: true
 
     ###########################################################
-    # Verify Python (use the system-installed Python already on
-    # this self-hosted agent instead of downloading one from
-    # GitHub - the download was failing because of low free
-    # memory on the agent machine, and it's unnecessary if
-    # Python is already installed on this box)
+    # Verify Python
     ###########################################################
 
     - powershell: |
@@ -159,7 +341,7 @@ stages:
         $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
         if (-not $pythonCmd) {
           Write-Host "##[error]Python was not found on PATH for this agent."
-          Write-Host "##[error]Please install Python 3.x once manually on this agent machine (e.g. from https://www.python.org/downloads/windows/) and ensure it is added to PATH, then re-run the pipeline."
+          Write-Host "##[error]Please install Python 3.x once manually on this agent machine and ensure it is added to PATH, then re-run the pipeline."
           exit 1
         }
 
@@ -178,8 +360,191 @@ stages:
 
     ###########################################################
     # Run Checkov
-    # NOTE: checkov also exits non-zero when it finds failed checks.
-    # ignoreLASTEXITCODE keeps this from blocking the pipeline.
+    ###########################################################
+
+    - powershell: |
+        checkov -d .
+      workingDirectory: $(workingDir)
+      displayName: Run Checkov
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Terraform Plan
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Plan
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: $(workingDir)
+        environmentServiceNameAzureRM: DevSecOPs
+
+
+###############################################################
+# PROD STAGE (runs only after QA succeeds)
+# Tip: create an Azure DevOps Environment named "Prod" and add
+# a manual approval check on it (Pipelines > Environments) if
+# you want a human sign-off before this stage's Terraform Plan
+# (or a future Apply) runs against production.
+###############################################################
+
+- stage: PROD
+  displayName: "Terraform PROD"
+  dependsOn: QA
+  condition: succeeded()
+
+  jobs:
+  - job: Terraform_PROD
+    displayName: "Terraform PROD Validation"
+
+    variables:
+      workingDir: '$(System.DefaultWorkingDirectory)/Root/Prod'
+
+    steps:
+
+    - checkout: self
+
+    ###########################################################
+    # Install Terraform
+    ###########################################################
+
+    - task: TerraformInstaller@1
+      displayName: Install Terraform
+      inputs:
+        terraformVersion: $(terraformVersion)
+
+    ###########################################################
+    # Terraform Init
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: $(workingDir)
+
+        backendServiceArm: DevSecOPs
+        backendAzureRmResourceGroupName: devsecops-rg
+        backendAzureRmStorageAccountName: devsecopsstrg
+        backendAzureRmContainerName: devsecopcont
+        backendAzureRmKey: prod.tfstate
+
+    ###########################################################
+    # Terraform Format
+    ###########################################################
+
+    - script: |
+        terraform fmt -recursive
+      workingDirectory: $(workingDir)
+      displayName: Terraform Format
+
+    ###########################################################
+    # Terraform Validate
+    ###########################################################
+
+    - task: TerraformTask@5
+      displayName: Terraform Validate
+      inputs:
+        provider: azurerm
+        command: validate
+        workingDirectory: $(workingDir)
+
+    ###########################################################
+    # Install TFLint (direct binary download, no choco needed)
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $installDir = "$(Agent.ToolsDirectory)\tflint"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+        $zipUrl = "https://github.com/terraform-linters/tflint/releases/download/v$(tflintVersion)/tflint_windows_amd64.zip"
+        $zipPath = "$installDir\tflint.zip"
+
+        Write-Host "Downloading TFLint from $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+
+        Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFLint installed at $installDir"
+      displayName: Install TFLint
+
+    ###########################################################
+    # Run TFLint
+    ###########################################################
+
+    - powershell: |
+        tflint --version
+        tflint --init
+        tflint
+      workingDirectory: $(workingDir)
+      displayName: Run TFLint
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Install TFSEC (direct binary download, no choco needed)
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $installDir = "$(Agent.ToolsDirectory)\tfsec"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+        $exeUrl = "https://github.com/aquasecurity/tfsec/releases/download/v$(tfsecVersion)/tfsec-windows-amd64.exe"
+        $exePath = "$installDir\tfsec.exe"
+
+        Write-Host "Downloading TFSEC from $exeUrl"
+        Invoke-WebRequest -Uri $exeUrl -OutFile $exePath
+
+        Write-Host "##vso[task.prependpath]$installDir"
+        Write-Host "TFSEC installed at $installDir"
+      displayName: Install TFSEC
+
+    ###########################################################
+    # Run TFSEC
+    ###########################################################
+
+    - powershell: |
+        tfsec --version
+        tfsec .
+      workingDirectory: $(workingDir)
+      displayName: Run TFSEC
+      ignoreLASTEXITCODE: true
+
+    ###########################################################
+    # Verify Python
+    ###########################################################
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pythonCmd) {
+          Write-Host "##[error]Python was not found on PATH for this agent."
+          Write-Host "##[error]Please install Python 3.x once manually on this agent machine and ensure it is added to PATH, then re-run the pipeline."
+          exit 1
+        }
+
+        python --version
+      displayName: Verify Python
+
+    ###########################################################
+    # Install Checkov
+    ###########################################################
+
+    - powershell: |
+        python -m pip install --upgrade pip
+        pip install checkov
+        checkov --version
+      displayName: Install Checkov
+
+    ###########################################################
+    # Run Checkov
     ###########################################################
 
     - powershell: |
