@@ -5,40 +5,41 @@ pool:
   name: DevOps
 
 variables:
+  workingDir: '$(System.DefaultWorkingDirectory)/Root/Dev'
   terraformVersion: '1.9.8'
 
 stages:
-
-#############################################################
-# DEV
-#############################################################
 
 - stage: DEV
   displayName: "Terraform DEV"
 
   jobs:
-
-  - job: DevTerraform
+  - job: Terraform_DEV
+    displayName: "Terraform DEV Validation"
 
     steps:
 
     - checkout: self
+
+    ###########################################################
+    # Install Terraform
+    ###########################################################
 
     - task: TerraformInstaller@1
       displayName: Install Terraform
       inputs:
         terraformVersion: $(terraformVersion)
 
-    #########################
-    # INIT
-    #########################
+    ###########################################################
+    # Terraform Init
+    ###########################################################
 
     - task: TerraformTask@5
       displayName: Terraform Init
       inputs:
         provider: azurerm
         command: init
-        workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+        workingDirectory: $(workingDir)
 
         backendServiceArm: DevSecOPs
         backendAzureRmResourceGroupName: devsecops-rg
@@ -46,56 +47,107 @@ stages:
         backendAzureRmContainerName: devsecopcont
         backendAzureRmKey: dev.tfstate
 
+    ###########################################################
+    # Terraform Format
+    ###########################################################
 
+    - script: |
+        terraform fmt -recursive
+      workingDirectory: $(workingDir)
+      displayName: Terraform Format
 
-    #########################
-    # VALIDATE
-    #########################
+    ###########################################################
+    # Terraform Validate
+    ###########################################################
 
     - task: TerraformTask@5
       displayName: Terraform Validate
       inputs:
         provider: azurerm
         command: validate
-        workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+        workingDirectory: $(workingDir)
 
-    #########################
-    # TFLINT
-    #########################
+    ###########################################################
+    # Install TFLint
+    ###########################################################
 
-    - script: |
+    - powershell: |
+        if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+            Write-Host "Chocolatey is not installed."
+            exit 1
+        }
+
+        choco install tflint -y
+
+        $env:Path += ";C:\ProgramData\chocolatey\bin"
+
+        tflint --version
+      displayName: Install TFLint
+
+    ###########################################################
+    # Run TFLint
+    ###########################################################
+
+    - powershell: |
         tflint --init
         tflint
-      displayName: TFLint
-      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      workingDirectory: $(workingDir)
+      displayName: Run TFLint
 
-    #########################
-    # TFSEC
-    #########################
+    ###########################################################
+    # Install TFSEC
+    ###########################################################
 
-    - script: |
+    - powershell: |
+        choco install tfsec -y
+        tfsec --version
+      displayName: Install TFSEC
+
+    ###########################################################
+    # Run TFSEC
+    ###########################################################
+
+    - powershell: |
         tfsec .
-      displayName: TFSec
-      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      workingDirectory: $(workingDir)
+      displayName: Run TFSEC
 
-    #########################
-    # CHECKOV
-    #########################
+    ###########################################################
+    # Install Python
+    ###########################################################
 
-    - script: |
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.x'
+
+    ###########################################################
+    # Install Checkov
+    ###########################################################
+
+    - powershell: |
+        python -m pip install --upgrade pip
+        pip install checkov
+        checkov --version
+      displayName: Install Checkov
+
+    ###########################################################
+    # Run Checkov
+    ###########################################################
+
+    - powershell: |
         checkov -d .
-      displayName: Checkov
-      workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+      workingDirectory: $(workingDir)
+      displayName: Run Checkov
 
-    #########################
-    # PLAN
-    #########################
+    ###########################################################
+    # Terraform Plan
+    ###########################################################
 
     - task: TerraformTask@5
       displayName: Terraform Plan
       inputs:
         provider: azurerm
         command: plan
-        workingDirectory: $(System.DefaultWorkingDirectory)/Root/Dev
+        workingDirectory: $(workingDir)
         environmentServiceNameAzureRM: DevSecOPs
 
