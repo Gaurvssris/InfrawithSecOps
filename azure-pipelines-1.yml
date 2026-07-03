@@ -146,12 +146,25 @@ stages:
       ignoreLASTEXITCODE: true
 
     ###########################################################
-    # Install Python
+    # Verify Python (use the system-installed Python already on
+    # this self-hosted agent instead of downloading one from
+    # GitHub - the download was failing because of low free
+    # memory on the agent machine, and it's unnecessary if
+    # Python is already installed on this box)
     ###########################################################
 
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '3.x'
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pythonCmd) {
+          Write-Host "##[error]Python was not found on PATH for this agent."
+          Write-Host "##[error]Please install Python 3.x once manually on this agent machine (e.g. from https://www.python.org/downloads/windows/) and ensure it is added to PATH, then re-run the pipeline."
+          exit 1
+        }
+
+        python --version
+      displayName: Verify Python
 
     ###########################################################
     # Install Checkov
